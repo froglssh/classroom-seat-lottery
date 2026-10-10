@@ -121,7 +121,13 @@
           </div>
 
           <div class="rounded-2xl bg-white/5 border border-white/10 p-4">
-            <h3 class="panel-title text-base mb-3"><span class="icon-dot bg-amber-300"></span>學生標籤設定</h3>
+            <div class="flex items-center justify-between gap-2 mb-3">
+              <h3 class="panel-title text-base"><span class="icon-dot bg-amber-300"></span>學生標籤設定</h3>
+              <label for="importRoleJsonFile" class="cursor-pointer inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold shadow transition whitespace-nowrap">
+                <span>📥 匯入幹部小老師 JSON</span>
+              </label>
+              <input id="importRoleJsonFile" type="file" accept=".json" class="hidden">
+            </div>
             <div class="grid grid-cols-1 gap-3">
               <select id="tagStudentSelect" class="rounded-xl bg-white/10 border border-white/15 focus:outline-none focus:ring-2 focus:ring-amber-400/60 px-3 py-2">
                 <option value="">請先匯入或輸入學生名單</option>
@@ -132,11 +138,11 @@
               <input id="studentTagInput" type="text" class="rounded-xl bg-white/10 border border-white/15 focus:outline-none focus:ring-2 focus:ring-amber-400/60 px-3 py-2" placeholder="或手動輸入學生備註">
             </div>
             <div class="mt-3 flex flex-wrap gap-2">
-              <button id="saveStudentTagBtn" class="px-3 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 font-semibold">儲存學生標籤</button>
-              <button id="clearStudentTagBtn" class="px-3 py-2 rounded-xl bg-white/15 hover:bg-white/25 border border-white/20 font-semibold">清除此學生標籤</button>
-              <button id="clearAllStudentTagsBtn" class="px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 font-semibold shadow">清除全班學生標籤</button>
+              <button id="saveStudentTagBtn" class="px-3 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 font-semibold text-sm">儲存學生標籤</button>
+              <button id="clearStudentTagBtn" class="px-3 py-2 rounded-xl bg-white/15 hover:bg-white/25 border border-white/20 font-semibold text-sm">清除此學生標籤</button>
+              <button id="clearAllStudentTagsBtn" class="px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 font-semibold shadow text-sm">清除全班學生標籤</button>
             </div>
-            <p class="text-xs text-white/70 mt-2">學生標籤會跟著學生移動，隨機或手動安排後仍會顯示在座號右側。</p>
+            <p class="text-xs text-white/70 mt-2">支援直接匯入「幹部小老師程式」匯出的 JSON 檔自動標記；學生標籤會跟著學生移動，顯示在座號右側。</p>
           </div>
         </div>
 
@@ -842,6 +848,205 @@
       toast('已清除全班學生標籤，學生姓名與座號已保留');
     }
 
+    // ---------- 幹部小老師 JSON 匯入 ----------
+    function handleRoleJsonFile(file) {
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        try {
+          const data = JSON.parse(event.target.result);
+          importRoleDataFromJSON(data);
+        } catch (err) {
+          console.error(err);
+          toast('幹部小老師 JSON 檔案解析失敗，請確認檔案格式');
+        }
+      };
+      reader.readAsText(file);
+    }
+
+    function importRoleDataFromJSON(data) {
+      if (!data || typeof data !== 'object') {
+        toast('無效的 JSON 檔案內容');
+        return;
+      }
+
+      // 1. 取得學生清單（若 JSON 含有 students 陣列）
+      const jsonStudents = Array.isArray(data.students) ? data.students : [];
+      const studentMap = new Map(); // id -> { id, name, no, roles: [] }
+
+      jsonStudents.forEach(st => {
+        if (!st || !st.id) return;
+        const no = String(st.no ?? st.number ?? st.seatNo ?? '').trim();
+        const name = String(st.name ?? '').trim();
+        studentMap.set(st.id, { id: st.id, name, no, roles: [] });
+      });
+
+      // 2. 收集所有職務 / 任務 (支援 tasks.officer, tasks.tutor, 或陣列格式)
+      const taskList = [];
+      if (data.tasks && typeof data.tasks === 'object') {
+        if (Array.isArray(data.tasks)) {
+          taskList.push(...data.tasks);
+        } else {
+          Object.values(data.tasks).forEach(subList => {
+            if (Array.isArray(subList)) taskList.push(...subList);
+          });
+        }
+      } else if (Array.isArray(data.officers)) {
+        taskList.push(...data.officers);
+      } else if (Array.isArray(data.roles)) {
+        taskList.push(...data.roles);
+      }
+
+      // 清理職位名稱（例如去除「地  科」多餘排版空白）
+      const cleanRoleName = (raw) => {
+        const str = String(raw || '').trim();
+        if (!str) return '';
+        // 若為全中文或中文加數字，移除字間空格以適應座位標籤寬度
+        if (/^[\u4e00-\u9fa5\s\d]+$/.test(str)) {
+          return str.replace(/\s+/g, '');
+        }
+        return str.replace(/\s+/g, ' ');
+      };
+
+      const newRolesDiscovered = [];
+
+      taskList.forEach(task => {
+        if (!task) return;
+        const roleName = cleanRoleName(task.name ?? task.title ?? task.role);
+        if (!roleName) return;
+
+        if (!roleOptions.includes(roleName) && !newRolesDiscovered.includes(roleName)) {
+          newRolesDiscovered.push(roleName);
+        }
+
+        const studentId = task.studentId ?? task.student_id;
+        if (studentId && studentMap.has(studentId)) {
+          studentMap.get(studentId).roles.push(roleName);
+        }
+      });
+
+      // 將探索到的新職稱加入下拉選單
+      if (newRolesDiscovered.length > 0) {
+        newRolesDiscovered.forEach(r => roleOptions.push(r));
+        ['#roleSelect', '#tagRoleSelect'].forEach(selector => {
+          const select = $(selector);
+          if (!select) return;
+          newRolesDiscovered.forEach(role => {
+            const op = document.createElement('option');
+            op.value = role;
+            op.textContent = role;
+            select.appendChild(op);
+          });
+        });
+      }
+
+      // 依姓名與座號建立職位查詢表
+      const rolesByName = new Map();
+      const rolesByNo = new Map();
+
+      studentMap.forEach(info => {
+        const uniqueRoles = [...new Set(info.roles)];
+        if (!uniqueRoles.length) return;
+
+        if (info.name) {
+          const existing = rolesByName.get(info.name) || [];
+          rolesByName.set(info.name, [...existing, ...uniqueRoles]);
+        }
+        if (info.no) {
+          const noNum = parseInt(info.no, 10);
+          if (!Number.isNaN(noNum)) {
+            const existing = rolesByNo.get(noNum) || [];
+            rolesByNo.set(noNum, [...existing, ...uniqueRoles]);
+          }
+        }
+      });
+
+      // 3. 若當前 state.students 是空的，但 JSON 有名單，則直接以此建立學生名單與職稱標籤
+      updateFromInputs();
+      const currentHasStudents = state.students && state.students.length > 0;
+
+      if (!currentHasStudents && jsonStudents.length > 0) {
+        state.students = jsonStudents.map(st => {
+          const info = studentMap.get(st.id);
+          const rawNo = String(st.no ?? st.number ?? '').trim();
+          const padNo = rawNo ? rawNo.padStart(2, '0') : '';
+          const name = String(st.name ?? '').trim();
+          const roles = info ? [...new Set(info.roles)] : [];
+          return {
+            number: padNo,
+            name: name,
+            note: roles.join('、')
+          };
+        }).filter(s => s.name);
+
+        $('#namesInput').value = studentsToInputText(state.students);
+        ensureGridInitialized();
+        syncAssignedStudentNotes();
+        persistCurrentPreset();
+        renderAll();
+
+        const taggedCount = state.students.filter(s => s.note).length;
+        toast(`已匯入 ${state.students.length} 位學生名單，並標註 ${taggedCount} 位幹部小老師職位！`);
+        return;
+      }
+
+      if (!currentHasStudents) {
+        toast('目前尚無學生名單，且 JSON 檔中未找到學生資料');
+        return;
+      }
+
+      // 4. 當前已有學生名單：精確比對並標註職位
+      let taggedCount = 0;
+
+      state.students.forEach(student => {
+        const sName = (student.name || '').trim();
+        const sNo = parseInt(student.number || '', 10);
+
+        let roles = [];
+
+        // 優先以 studentMap 交叉比對 (姓名一致且座號吻合)
+        for (const info of studentMap.values()) {
+          const infoNo = parseInt(info.no, 10);
+          const isNameMatch = info.name && info.name === sName;
+          const isNoMatch = !Number.isNaN(sNo) && !Number.isNaN(infoNo) && sNo === infoNo;
+
+          if (isNameMatch && isNoMatch) {
+            roles = info.roles;
+            break;
+          } else if (isNameMatch && (!info.no || Number.isNaN(infoNo))) {
+            roles = info.roles;
+            break;
+          }
+        }
+
+        // 次之依姓名比對
+        if (!roles.length && rolesByName.has(sName)) {
+          roles = rolesByName.get(sName);
+        }
+
+        // 次之若座號吻合
+        if (!roles.length && !Number.isNaN(sNo) && rolesByNo.has(sNo)) {
+          roles = rolesByNo.get(sNo);
+        }
+
+        if (roles.length) {
+          const uniqueRoles = [...new Set(roles)];
+          student.note = uniqueRoles.join('、');
+          taggedCount++;
+        }
+      });
+
+      syncAssignedStudentNotes();
+      persistCurrentPreset();
+      renderAll();
+
+      if (taggedCount > 0) {
+        toast(`成功匯入！已標註 ${taggedCount} 位學生幹部與小老師職位`);
+      } else {
+        toast('已讀取 JSON，但未找到匹配的學生職稱資料');
+      }
+    }
+
     // ---------- Actions ----------
     function updateFromInputs() {
       state.className = ($('#className').value || '').trim();
@@ -1493,6 +1698,10 @@
 
     $('#studentSearch').addEventListener('input', buildStudentOptions);
     $('#closeModal').addEventListener('click', closeAssignModal);
+    $('#importRoleJsonFile').addEventListener('change', (ev) => {
+      handleRoleJsonFile(ev.target.files[0]);
+      ev.target.value = '';
+    });
     $('#tagStudentSelect').addEventListener('change', loadSelectedStudentTag);
     $('#tagRoleSelect').addEventListener('change', () => {
       $('#studentTagInput').value = $('#tagRoleSelect').value;
